@@ -79,7 +79,7 @@ module.exports = {
         message: `missing parameters \n
         row(Integer) && col(Integer) required`
       });
-    }*/ else if (req.body.surrender && req.body.surrender === 'true') {
+    }*/ else if (req.body.surrender) {
       const token = req.headers.authorization;
       Game.surrender(token)
       .then(result => {

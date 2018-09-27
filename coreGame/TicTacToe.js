@@ -20,14 +20,14 @@ class Delete {
   constructor(id) {
     this.id = id;
     this.interval = false; 
-    this.start = this.init();
+    this.start = this.init(this.id);
   }
 
-  init() {
+  init(id) {
     this.interval = setTimeout(function(){
-      Model.findByIdAndRemove(this.id).exec()
-        .then(result => console.log(`Game ${this.id} was deleted`))
-        .catch(error => console.log(`Can't delete ${this.id} game`))
+      Model.findByIdAndRemove(id).exec()
+        .then(result => console.log(`Game ${id} was deleted`))
+        .catch(error => console.log(`Can't delete ${id} game`))
     },300000);
     Delete._games.add(this);
   }
@@ -39,7 +39,7 @@ class Delete {
   static update(id) {
     for (game of this._games) {
       if (game.id === id) {
-        game.init();
+        game.init(id);
         console.log(`Update delete ${id}`)
       } 
     }
@@ -332,39 +332,41 @@ module.exports = {
 
     try {
       result = await game.save();
+
+      if (result) {
+        let token;
+        
+        try {
+          token = await jwt.sign({
+            id: result._id,
+            who: 'owner'
+          }, secretKey, { expiresIn: '1h' });
+
+          if (token) {
+            await new Delete(result._id);
+  
+            return {
+              status: 'ok',
+              code: 0,
+              accessToken: token,
+              gameToken: result._id
+            }
+          }
+        } catch(error) {
+          console.log(error);
+          return {
+            status: 'error',
+            code: 500,
+            message: 'Internal Server Error'
+          }
+        }
+      }
     } catch(error) {
       console.log(error);
       return {
         status: 'error',
         code: 500,
         message: 'Internal Server Error'
-      }
-    }
-    
-    if (result) {
-      let token;
-      
-      try {
-        token = await jwt.sign({
-          id: result._id,
-          who: 'owner'
-        }, secretKey, { expiresIn: '1h' });
-      } catch(error) {
-        console.log(error);
-        return {
-          status: 'error',
-          code: 500,
-          message: 'Internal Server Error'
-        }
-      }
-
-      await new Delete(result._id);
-
-      return {
-        status: 'ok',
-        code: 0,
-        accessToken: token,
-        gameToken: result._id
       }
     }
   },
@@ -375,6 +377,70 @@ module.exports = {
     
     try {
       game = await Model.findById(gameToken);
+
+      if (game) {
+        let token;
+  
+        if (game.state === 'ready') {
+          await Delete.cancel(gameToken);
+          game.opponent = userName;
+          game.state = 'playing'
+          game.duration = Date.now();
+          await Delete.update(gameToken);
+          await game.save();
+          
+          try {
+            token = await jwt.sign({
+              id: game._id,
+              who: 'opponent'
+            }, secretKey, { expiresIn: '1h' });
+
+            if (token) {
+              return {
+                status: 'ok',
+                code: 0,
+                accessToken: token
+              }
+            }
+          } catch(error) {
+            console.log(error);
+            return {
+              status: 'error',
+              code: 500,
+              message: 'Internal Server Error'
+            }
+          }
+        } else {
+
+          try {
+            token = await jwt.sign({
+              id: game._id,
+              who: 'guest'
+            }, secretKey, { expiresIn: '1h' });
+
+            if (token) {
+              return {
+                status: 'ok',
+                code: 0,
+                accessToken: token
+              }
+            }
+          } catch(error) {
+            console.log(error);
+            return {
+              status: 'error',
+              code: 500,
+              message: 'Internal Server Error'
+            }
+          }
+        }  
+      } else {
+        return {
+          status: 'error',
+          code: 404,
+          message: 'Game not found'
+        }
+      }
     } catch(error) {
       console.log(error);
       return {
@@ -382,63 +448,6 @@ module.exports = {
         code: 404,
         message: 'Invalid gameToken'
       }   
-    }
-
-    if (game) {
-      let token;
-
-      if (game.state === 'ready') {
-        await Delete.cancel(gameToken);
-        game.opponent = userName;
-        game.state = 'playing'
-        game.duration = Date.now();
-        await Delete.update(gameToken);
-        await game.save();
-        
-        try {
-          token = await jwt.sign({
-            id: game._id,
-            who: 'opponent'
-          }, secretKey, { expiresIn: '1h' });
-        } catch(error) {
-          console.log(error);
-          return {
-            status: 'error',
-            code: 500,
-            message: 'Internal Server Error'
-          }
-        }
-        
-      } else {
-
-        try {
-          token = await jwt.sign({
-            id: game._id,
-            who: 'guest'
-          }, secretKey, { expiresIn: '1h' });
-        } catch(error) {
-          console.log(error);
-          return {
-            status: 'error',
-            code: 500,
-            message: 'Internal Server Error'
-          }
-        }
-      }
-      
-      if (token) {
-        return {
-          status: 'ok',
-          code: 0,
-          accessToken: token
-        }
-      }
-    } else {
-      return {
-        status: 'error',
-        code: 404,
-        message: 'Game not found'
-      }
     }
   },
 
@@ -448,6 +457,87 @@ module.exports = {
 
     try {
       decoded = jwt.verify(accessToken, secretKey);
+
+      if (decoded) {
+        let game;
+  
+        try {
+          game = await Model.findById(decoded.id);
+
+          if (game) {
+            if (game.lastStep !== decoded.who) {
+              let symbol;
+    
+              if (decoded.who === 'owner') {
+                symbol = 'X';
+              } else if (decoded.who === 'opponent') {
+                symbol = '0';
+              }
+    
+              if (game.battlefield[row-1][col-1]) {
+                if (game.battlefield[row-1][col-1] === '?') {
+                  game.battlefield[row-1][col-1] = symbol;
+                  game.markModified('battlefield');
+                  game.lastStep = decoded.who;
+                  await Delete.cancel(decoded.id);
+                  let isDone = await checkWinner(game.battlefield, symbol, game.size);
+                  if (isDone) {
+                    game.duration = Date.now() - game.duration;
+                    game.state = 'done';
+                    game.result = decoded.who;
+                  } else if (game.battlefield.every((arr) => { 
+                    arr.every(elem => elem !== '?');
+                  })) {
+                    game.duration = Date.now() - game.duration;
+                    game.state = 'done';
+                    game.result = 'draw';
+                  } else {
+                    await Delete.update(decoded.id);
+                  }
+                  
+                  await game.save();
+    
+                  return {
+                    status: 'ok',
+                    code: 0
+                  }
+                } else {
+                  return {
+                    status: 'error',
+                    code: 400,
+                    message: 'Coordinaties is busy'
+                  };
+                }
+              } 
+            } else {
+              return {
+                status: 'error',
+                code: 300,
+                message: 'Not you turn'
+              };
+            }
+          } else {
+            return {
+              status: 'error',
+              code: 404,
+              message: 'Game not found'
+            }
+          }
+        } catch(error) {
+          console.log(error);
+          return {
+            status: 'error',
+            code: 500,
+            message: 'Internal Server Error'
+          } 
+        }  
+      } else {
+        return {
+          status: 'error',
+          code: 401,
+          message: 'Invalid accessToken'
+        };
+      }
     } catch(error) {
       console.log(error);
       return {
@@ -455,88 +545,7 @@ module.exports = {
         code: 401,
         message: 'Invaild accessToken'
       }
-    }
-
-    if (decoded) {
-      let game;
-
-      try {
-        game = await Model.findById(decoded.id);
-      } catch(error) {
-        console.log(error);
-        return {
-          status: 'error',
-          code: 500,
-          message: 'Internal Server Error'
-        } 
-      }
-
-      if (game) {
-        if (game.lastStep !== decoded.who) {
-          let symbol;
-
-          if (decoded.who === 'owner') {
-            symbol = 'X';
-          } else if (decoded.who === 'opponent') {
-            symbol = '0';
-          }
-
-          if (game.battlefield[row-1][col-1]) {
-            if (game.battlefield[row-1][col-1] === '?') {
-              game.battlefield[row-1][col-1] = symbol;
-              game.markModified('battlefield');
-              game.lastStep = decoded.who;
-              await Delete.cancel(decoded.id);
-              let isDone = await checkWinner(game.battlefield, symbol, game.size);
-              if (isDone) {
-                game.duration = Date.now() - game.duration;
-                game.state = 'done';
-                game.result = decoded.who;
-              } else if (game.battlefield.every((arr) => { 
-                arr.every(elem => elem !== '?');
-              })) {
-                game.duration = Date.now() - game.duration;
-                game.state = 'done';
-                game.result = 'draw';
-              } else {
-                await Delete.update(decoded.id);
-              }
-              
-              await game.save();
-
-              return {
-                status: 'ok',
-                code: 0
-              }
-            } else {
-              return {
-                status: 'error',
-                code: 400,
-                message: 'Coordinaties is busy'
-              };
-            }
-          } 
-        } else {
-          return {
-            status: 'error',
-            code: 300,
-            message: 'Not you turn'
-          };
-        }
-      } else {
-        return {
-          status: 'error',
-          code: 404,
-          message: 'Game not found'
-        }
-      }
-    } else {
-      return {
-        status: 'error',
-        code: 401,
-        message: 'Invalid accessToken'
-      };
-    }
+    }    
   },
 
 
@@ -545,6 +554,54 @@ module.exports = {
 
     try {
       decoded = jwt.verify(accessToken, secretKey);
+
+      if (decoded) {
+        if (decoded.who === 'owner' || decoded.who === 'opponent') {
+          let game;
+  
+          try {
+            game = await Model.findById(decoded.id);
+
+            if (game) {
+              game.duration = Date.now() - game.duration;
+              game.state = 'done';
+              game.result = decoded.who;
+              Delete.cancel(decoded.id);
+              await game.save();
+    
+              return {
+                status: 'ok',
+                code: 0,
+              }
+            } else {
+              return {
+                status: 'error',
+                code: 404,
+                message: 'Game not found'
+              }
+            }
+          } catch(error) {
+            console.log(error);
+            return {
+              status: 'error',
+              code: 500,
+              message: 'Internal Server Error'
+            } 
+          }         
+        } else {
+          return {
+            status: 'error',
+            code: 300,
+            message: 'You must be owner or opponent'
+          }  
+        }
+      } else {
+        return {
+          status: 'error',
+          code: 401,
+          message: 'Invalid token'
+        }
+      }
     } catch(error) {
       console.log(error);
       return {
@@ -552,49 +609,7 @@ module.exports = {
         code: 401,
         message: 'Invaild accessToken'
       }
-    }
-
-    if (decoded) {
-      if (decoded.who === 'owner' || decoded.who === 'opponent') {
-        let game;
-
-        try {
-          game = await Model.findById(decoded.id);
-        } catch(error) {
-          console.log(error);
-          return {
-            status: 'error',
-            code: 500,
-            message: 'Internal Server Error'
-          } 
-        }
-
-        if (game) {
-          game.duration = Date.now() - game.duration;
-          game.state = 'done';
-          game.result = decoded.who;
-          Delete.cancel(decoded.id);
-          await game.save();
-
-          return {
-            status: 'ok',
-            code: 0,
-          }
-        } else {
-          return {
-            status: 'error',
-            code: 404,
-            message: 'Game not found'
-          }
-        }
-      }  
-    } else {
-      return {
-        status: 'error',
-        code: 401,
-        message: 'Invalid token'
-      }
-    }
+    }   
   },
 
 
@@ -602,6 +617,38 @@ module.exports = {
     let games;
     try {
       games = await Model.find();
+
+      if (games && games.length > 0) {
+        let tmp = [];
+        for (let game of games) {
+          if (game.duration !== 'Not started' && game.state !== 'done') {
+            gameDuration = Date.now() - game.duration;
+          } else {
+            gameDuration = game.duration;
+          }
+          await tmp.push({
+            gameToken: game._id,
+            owner: game.owner,
+            opponent: game.opponent,
+            size: game.size,
+            gameDuration,
+            gameResult: game.result,
+            state: game.state
+          });
+        } 
+  
+        return {
+          status: 'ok',
+          code: 0,
+          games: tmp
+        }
+      } else {
+        return {
+          status: 'error',
+          code: 404,
+          message: 'Games not found'
+        }
+      }
     } catch(error) {
       console.log(error);
       return {
@@ -609,39 +656,7 @@ module.exports = {
         code: 500,
         message: 'Internal Server Error'
       }
-    }
-
-    if (games && games.length > 0) {
-      let tmp = [];
-      for (let game of games) {
-        if (game.duration !== 'Not started' && game.state !== 'done') {
-          gameDuration = Date.now() - game.duration;
-        } else {
-          gameDuration = game.duration;
-        }
-        await tmp.push({
-          gameToken: game._id,
-          owner: game.owner,
-          opponent: game.opponent,
-          size: game.size,
-          gameDuration,
-          gameResult: game.result,
-          state: game.state
-        });
-      } 
-
-      return {
-        status: 'ok',
-        code: 0,
-        games: tmp
-      }
-    } else {
-      return {
-        status: 'error',
-        code: 404,
-        message: 'Games not found'
-      }
-    }
+    }   
   },
 
 
@@ -650,6 +665,69 @@ module.exports = {
 
     try {
       decoded = jwt.verify(accessToken, secretKey);
+
+      if (decoded) {
+        let game;
+  
+        try {
+          game = await Model.findById(decoded.id); 
+
+          if (game) {
+            let winner;
+            let youTurn = false;
+            let you = decoded.who;
+    
+            if (game.status === 'done') {
+              if (game.result === 'owner') {
+                winner = game.owner;
+              } else if (game.result === 'opponent') {
+                winner = game.opponent;
+              }
+            }
+            
+            if (game.duration !== 'Not started' && game.state !== 'done') {
+              gameDuration = Date.now() - game.duration;
+            } else {
+              gameDuration = game.duration;
+            }
+    
+            if (decoded.who !== game.lastStep) {
+              youTurn = true;
+            }
+    
+            return {
+              status: 'ok',
+              code: 0,
+              you,
+              owner: game.owner,
+              opponent: game.opponent,
+              youTurn,
+              gameDuration,
+              field: game.battlefield,
+              winner
+            }
+          } else {
+            return {
+              status: 'error',
+              code: 404,
+              message: 'Game not found'
+            }
+          }
+        } catch(error) {
+          console.log(error);
+          return {
+            status: 'error',
+            code: 500,
+            message: 'Internal Server Error'
+          } 
+        }       
+      } else {
+        return {
+          status: 'error',
+          code: 401,
+          message: 'Invalid accessToken'
+        }
+      }
     } catch(error) {
       console.log(error);
       return {
@@ -657,63 +735,6 @@ module.exports = {
         code: 401,
         message: 'Invaild accessToken'
       }
-    }
-
-    if (decoded) {
-      let game;
-
-      try {
-        game = await Model.findById(decoded.id);
-      } catch(error) {
-        console.log(error);
-        return {
-          status: 'error',
-          code: 500,
-          message: 'Internal Server Error'
-        } 
-      }
-
-      if (game) {
-        let winner;
-        let youTurn = false;
-        let you = decoded.who;
-
-        if (game.status === 'done') {
-          if (game.result === 'owner') {
-            winner = game.owner;
-          } else if (game.result === 'opponent') {
-            winner = game.opponent;
-          }
-        }
-        
-        if (game.duration !== 'Not started' && game.state !== 'done') {
-          gameDuration = Date.now() - game.duration;
-        } else {
-          gameDuration = game.duration;
-        }
-
-        if (decoded.who !== game.lastStep) {
-          youTurn = true;
-        }
-
-        return {
-          status: 'ok',
-          code: 0,
-          you,
-          owner: game.owner,
-          opponent: game.opponent,
-          youTurn,
-          gameDuration,
-          field: game.battlefield,
-          winner
-        }
-      } else {
-        return {
-          status: 'error',
-          code: 404,
-          message: 'Game not found'
-        }
-      }
-    }
+    }    
   }
 }
