@@ -22,13 +22,14 @@ class Delete {
     this.interval = false; 
     this.start = this.init();
   }
+
   init() {
     this.interval = setTimeout(function(){
       Model.findByIdAndRemove(this.id).exec()
         .then(result => console.log(`Game ${this.id} was deleted`))
         .catch(error => console.log(`Can't delete ${this.id} game`))
     },300000);
-    this._games.add(this);
+    Delete._games.add(this);
   }
 
   clear() {
@@ -522,7 +523,19 @@ module.exports = {
             message: 'Not you turn'
           };
         }
+      } else {
+        return {
+          status: 'error',
+          code: 404,
+          message: 'Game not found'
+        }
       }
+    } else {
+      return {
+        status: 'error',
+        code: 401,
+        message: 'Invalid accessToken'
+      };
     }
   },
 
@@ -562,6 +575,11 @@ module.exports = {
           game.result = decoded.who;
           Delete.cancel(decoded.id);
           await game.save();
+
+          return {
+            status: 'ok',
+            code: 0,
+          }
         } else {
           return {
             status: 'error',
